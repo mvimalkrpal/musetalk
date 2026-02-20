@@ -12,14 +12,35 @@ from musetalk.models.vae import VAE
 from musetalk.models.unet import UNet,PositionalEncoding
 
 
+def _resolve_vae_model_path(vae_type: str) -> str:
+    """Resolve VAE directory across naming variants used in this repo."""
+    base = os.path.join("models", vae_type)
+    if os.path.exists(os.path.join(base, "config.json")):
+        return base
+
+    # Common mismatch in scripts: sd-vae <-> sd-vae-ft-mse
+    if vae_type == "sd-vae":
+        fallback = os.path.join("models", "sd-vae-ft-mse")
+        if os.path.exists(os.path.join(fallback, "config.json")):
+            return fallback
+    elif vae_type == "sd-vae-ft-mse":
+        fallback = os.path.join("models", "sd-vae")
+        if os.path.exists(os.path.join(fallback, "config.json")):
+            return fallback
+
+    # Return original and let downstream raise a clear error if missing.
+    return base
+
+
 def load_all_model(
     unet_model_path=os.path.join("models", "musetalkV15", "unet.pth"),
     vae_type="sd-vae",
     unet_config=os.path.join("models", "musetalkV15", "musetalk.json"),
     device=None,
 ):
+    vae_model_path = _resolve_vae_model_path(vae_type)
     vae = VAE(
-        model_path = os.path.join("models", vae_type),
+        model_path=vae_model_path,
     )
     print(f"load unet model from {unet_model_path}")
     unet = UNet(
