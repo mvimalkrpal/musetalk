@@ -30,18 +30,22 @@ import requests
 from teacher_realtime import AvatarCache, RuntimeModels, load_runtime, resolve_output_path
 
 
+def _log(msg: str) -> None:
+    print(msg, flush=True)
+
+
 def _log_exception(prefix: str, exc: BaseException) -> None:
-    print(f"[{time.strftime('%H:%M:%S')}] {prefix}: {type(exc).__name__}: {exc}")
+    _log(f"[{time.strftime('%H:%M:%S')}] {prefix}: {type(exc).__name__}: {exc}")
     traceback.print_exception(type(exc), exc, exc.__traceback__)
 
 
 def _sys_excepthook(exc_type, exc_value, exc_tb):
-    print(f"[{time.strftime('%H:%M:%S')}] UNCAUGHT EXCEPTION")
+    _log(f"[{time.strftime('%H:%M:%S')}] UNCAUGHT EXCEPTION")
     traceback.print_exception(exc_type, exc_value, exc_tb)
 
 
 def _threading_excepthook(args):
-    print(f"[{time.strftime('%H:%M:%S')}] UNCAUGHT THREAD EXCEPTION in {args.thread.name}")
+    _log(f"[{time.strftime('%H:%M:%S')}] UNCAUGHT THREAD EXCEPTION in {args.thread.name}")
     traceback.print_exception(args.exc_type, args.exc_value, args.exc_traceback)
 
 
@@ -150,7 +154,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     @app.middleware("http")
     async def request_entry_logger(request: Request, call_next):
         client = request.client.host if request.client else "-"
-        print(f"[{time.strftime('%H:%M:%S')}] RECV {request.method} {request.url.path} from {client}")
+        _log(f"[{time.strftime('%H:%M:%S')}] RECV {request.method} {request.url.path} from {client}")
         return await call_next(request)
 
     gemini_key = args.gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
@@ -431,16 +435,18 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         session_id: str = Form(default="default"),
         output_prefix: str = Form(default=args.output_prefix),
         reply_backend: str = Form(default=""),
+        request_id: str = Form(default=""),
     ):
+        rid = request_id or f"auto_{int(time.time() * 1000)}"
         req_start = time.time()
         effective_backend = (reply_backend or args.reply_backend).strip().lower()
         if effective_backend not in {"gemini", "ollama", "gemini_live"}:
             return JSONResponse(status_code=400, content={"error": "reply_backend must be 'gemini', 'ollama', or 'gemini_live'."})
-        print(
-            f"[{time.strftime('%H:%M:%S')}] POST /converse "
+        _log(
+            f"[{time.strftime('%H:%M:%S')}] [rid={rid}] POST /converse "
             f"filename={audio.filename} session_id={session_id} prefix={output_prefix} backend={effective_backend}"
         )
-        print(f"[{time.strftime('%H:%M:%S')}] /converse build marker: v2-backend-select")
+        _log(f"[{time.strftime('%H:%M:%S')}] [rid={rid}] /converse build marker: v2-backend-select")
         if not audio.filename.lower().endswith(".wav"):
             return JSONResponse(status_code=400, content={"error": "Only wav files are supported."})
 
@@ -465,15 +471,15 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         audio_duration_s = frames / float(rate)
             except Exception:
                 pass
-            print(
-                f"[{time.strftime('%H:%M:%S')}] /converse upload: "
+            _log(
+                f"[{time.strftime('%H:%M:%S')}] [rid={rid}] /converse upload: "
                 f"size={file_size}B duration={audio_duration_s:.2f}s write_ms={upload_ms:.0f}"
             )
 
             t_lock_wait = _now_ms()
             with infer_lock:
                 lock_wait_ms = _now_ms() - t_lock_wait
-                print(f"[{time.strftime('%H:%M:%S')}] /converse lock_wait_ms={lock_wait_ms:.0f}")
+                _log(f"[{time.strftime('%H:%M:%S')}] [rid={rid}] /converse lock_wait_ms={lock_wait_ms:.0f}")
 
                 if effective_backend == "gemini_live":
                     stt_ms = 0.0
@@ -481,7 +487,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     t1 = time.time()
                     live_pcm, live_transcript = await reply_audio_with_gemini_live(student_wav)
                     llm_ms = (time.time() - t1) * 1000
-                    print(f"[{time.strftime('%H:%M:%S')}] /converse gemini_live_audio_ms={llm_ms:.0f}")
+                    _log(f"[{time.strftime('%H:%M:%S')}] [rid={rid}] /converse gemini_live_audio_ms={llm_ms:.0f}")
                     student_text = "(gemini_live input audio)"
                     teacher_reply = "(gemini_live output audio)"
                     pcm24k_to_wav_file(live_pcm, reply_wav)
@@ -489,7 +495,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     t0 = time.time()
                     student_text = transcribe_with_gemini(student_wav)
                     stt_ms = (time.time() - t0) * 1000
-                    print(f"[{time.strftime('%H:%M:%S')}] /converse stt_ms={stt_ms:.0f}")
+                    _log(f"[{time.strftime('%H:%M:%S')}] [rid={rid}] /converse stt_ms={stt_ms:.0f}")
 
                     t1 = time.time()
                     if effective_backend == "gemini":
@@ -497,12 +503,12 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     else:
                         teacher_reply = reply_with_ollama(student_text, session_id)
                     llm_ms = (time.time() - t1) * 1000
-                    print(f"[{time.strftime('%H:%M:%S')}] /converse llm_ms={llm_ms:.0f}")
+                    _log(f"[{time.strftime('%H:%M:%S')}] [rid={rid}] /converse llm_ms={llm_ms:.0f}")
 
                     t2 = time.time()
                     synthesize_tts_windows(teacher_reply, reply_wav)
                     tts_ms = (time.time() - t2) * 1000
-                    print(f"[{time.strftime('%H:%M:%S')}] /converse tts_ms={tts_ms:.0f}")
+                    _log(f"[{time.strftime('%H:%M:%S')}] [rid={rid}] /converse tts_ms={tts_ms:.0f}")
 
                 t3 = time.time()
                 avatar.infer_audio(
@@ -515,22 +521,22 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     output_path=out_path,
                 )
                 render_ms = (time.time() - t3) * 1000
-                print(f"[{time.strftime('%H:%M:%S')}] /converse render_ms={render_ms:.0f}")
+                _log(f"[{time.strftime('%H:%M:%S')}] [rid={rid}] /converse render_ms={render_ms:.0f}")
 
-            print(
-                f"[{time.strftime('%H:%M:%S')}] /converse timings: "
+            _log(
+                f"[{time.strftime('%H:%M:%S')}] [rid={rid}] /converse timings: "
                 f"upload={upload_ms:.0f}ms lock_wait={lock_wait_ms:.0f}ms "
                 f"stt={stt_ms:.0f}ms llm={llm_ms:.0f}ms tts={tts_ms:.0f}ms render={render_ms:.0f}ms "
                 f"total={( _now_ms() - t_req_ms):.0f}ms"
             )
-            print(f"[{time.strftime('%H:%M:%S')}] reply_backend='{effective_backend}'")
+            _log(f"[{time.strftime('%H:%M:%S')}] [rid={rid}] reply_backend='{effective_backend}'")
             if effective_backend == "gemini_live":
-                print(f"[{time.strftime('%H:%M:%S')}] student='(audio input only)'")
-                print(f"[{time.strftime('%H:%M:%S')}] teacher='(audio output only)'")
+                _log(f"[{time.strftime('%H:%M:%S')}] [rid={rid}] student='(audio input only)'")
+                _log(f"[{time.strftime('%H:%M:%S')}] [rid={rid}] teacher='(audio output only)'")
             else:
-                print(f"[{time.strftime('%H:%M:%S')}] student='{student_text}'")
-                print(f"[{time.strftime('%H:%M:%S')}] teacher='{teacher_reply}'")
-            print(f"[{time.strftime('%H:%M:%S')}] POST /converse done in {time.time() - req_start:.2f}s")
+                _log(f"[{time.strftime('%H:%M:%S')}] [rid={rid}] student='{student_text}'")
+                _log(f"[{time.strftime('%H:%M:%S')}] [rid={rid}] teacher='{teacher_reply}'")
+            _log(f"[{time.strftime('%H:%M:%S')}] [rid={rid}] POST /converse done in {time.time() - req_start:.2f}s")
 
             headers = {
                 "X-Reply-Backend": effective_backend,

@@ -12,6 +12,7 @@ import ipaddress
 import socket
 import tempfile
 import time
+import uuid
 import wave
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -72,19 +73,26 @@ def send_to_musetalk_api(http: requests.Session, server_url: str, wav_path: Path
     out_video = out_dir / f"reply_{reply_backend}.mp4"
     base = resolve_server_base_url(server_url)
     url = base.rstrip("/") + "/converse"
+    size_bytes = wav_path.stat().st_size if wav_path.exists() else -1
+    request_id = uuid.uuid4().hex[:12]
     print(
-        f"[{ts()}] [client] POST {url} file={wav_path.name} session_id={session_id} "
+        f"[{ts()}] [client] request_id={request_id} POST {url} file={wav_path.name} size={size_bytes}B session_id={session_id} "
         f"prefix={output_prefix} backend={reply_backend}"
     )
 
     t_post = time.time()
     with open(wav_path, "rb") as f:
         files = {"audio": (wav_path.name, f, "audio/wav")}
-        data = {"output_prefix": output_prefix, "session_id": session_id, "reply_backend": reply_backend}
+        data = {
+            "output_prefix": output_prefix,
+            "session_id": session_id,
+            "reply_backend": reply_backend,
+            "request_id": request_id,
+        }
         resp = http.post(url, files=files, data=data, timeout=1800)
     resp.raise_for_status()
     print(
-        f"[{ts()}] [client] response status={resp.status_code} content-type={resp.headers.get('content-type')} "
+        f"[{ts()}] [client] request_id={request_id} response status={resp.status_code} content-type={resp.headers.get('content-type')} "
         f"roundtrip_ms={(time.time() - t_post) * 1000:.0f}"
     )
     student_text = unquote(resp.headers.get("X-Student-Text", ""))
@@ -124,12 +132,18 @@ def main() -> None:
     http = requests.Session()
 
     def generate_from_audio(audio_path: str, backends: list[str]):
+        print(f"[{ts()}] [client] handler:start audio_path={audio_path}")
         if not audio_path:
             return None, "Error: Record or upload a .wav file first."
         if not audio_path.lower().endswith(".wav"):
             return None, "Error: Only .wav is supported by the current server."
         if not backends:
             return None, "Error: Select at least one backend."
+        try:
+            in_size = Path(audio_path).stat().st_size
+        except Exception:
+            in_size = -1
+        print(f"[{ts()}] [client] handler:ready wav_size={in_size}B backends={backends}")
 
         start = time.time()
         normalized_wav = None
