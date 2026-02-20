@@ -11,13 +11,35 @@ import argparse
 import tempfile
 import threading
 import time
+import traceback
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse
 import uvicorn
 
 from teacher_realtime import AvatarCache, RuntimeModels, load_runtime, resolve_output_path
+
+
+def _log_exception(prefix: str, exc: BaseException) -> None:
+    print(f"[{time.strftime('%H:%M:%S')}] {prefix}: {type(exc).__name__}: {exc}")
+    traceback.print_exception(type(exc), exc, exc.__traceback__)
+
+
+def _sys_excepthook(exc_type, exc_value, exc_tb):
+    print(f"[{time.strftime('%H:%M:%S')}] UNCAUGHT EXCEPTION")
+    traceback.print_exception(exc_type, exc_value, exc_tb)
+
+
+def _threading_excepthook(args):
+    print(f"[{time.strftime('%H:%M:%S')}] UNCAUGHT THREAD EXCEPTION in {args.thread.name}")
+    traceback.print_exception(args.exc_type, args.exc_value, args.exc_traceback)
+
+
+sys.excepthook = _sys_excepthook
+threading.excepthook = _threading_excepthook
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,6 +79,15 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    print("=" * 72)
+    print("MuseTalk Teacher API starting...")
+    print(f"Host: {args.host}:{args.port}")
+    print(f"Avatar ID: {args.avatar_id}")
+    print(f"Video path: {args.video_path}")
+    print(f"Output dir: {output_dir.resolve()}")
+    print(f"Whisper device: {args.whisper_device}")
+    print("=" * 72)
+
     print("Loading warm runtime...")
     t0 = time.time()
     models: RuntimeModels = load_runtime(args)
@@ -76,8 +107,14 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
     infer_lock = threading.Lock()
 
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        _log_exception(f"UNHANDLED {request.method} {request.url.path}", exc)
+        return JSONResponse(status_code=500, content={"error": "Internal server error"})
+
     @app.get("/health")
     def health():
+        print(f"[{time.strftime('%H:%M:%S')}] GET /health")
         return {"status": "ok"}
 
     @app.post("/generate")
@@ -85,7 +122,13 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         audio: UploadFile = File(...),
         output_prefix: str = Form(default=args.output_prefix),
     ):
+        req_start = time.time()
+        print(
+            f"[{time.strftime('%H:%M:%S')}] POST /generate "
+            f"filename={audio.filename} prefix={output_prefix}"
+        )
         if not audio.filename.lower().endswith(".wav"):
+            print(f"[{time.strftime('%H:%M:%S')}] REJECT non-wav upload")
             return JSONResponse(
                 status_code=400,
                 content={"error": "Only wav files are supported for now."},
@@ -111,6 +154,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     output_path=out_path,
                 )
                 print(f"Inference done in {time.time() - start:.2f}s -> {out_path}")
+            print(f"[{time.strftime('%H:%M:%S')}] POST /generate done in {time.time() - req_start:.2f}s")
 
             return FileResponse(
                 str(out_path),
@@ -118,6 +162,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 filename=out_path.name,
             )
         except Exception as exc:
+            _log_exception("POST /generate error", exc)
             return JSONResponse(status_code=500, content={"error": str(exc)})
         finally:
             try:
@@ -132,10 +177,13 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
 def main() -> None:
     args = build_parser().parse_args()
-    app = create_app(args)
-    uvicorn.run(app, host=args.host, port=args.port)
+    try:
+        app = create_app(args)
+        uvicorn.run(app, host=args.host, port=args.port, access_log=True)
+    except Exception as exc:
+        _log_exception("FATAL server startup crash", exc)
+        raise
 
 
 if __name__ == "__main__":
     main()
-
