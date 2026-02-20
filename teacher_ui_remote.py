@@ -20,6 +20,10 @@ import gradio as gr
 import requests
 
 
+def ts() -> str:
+    return time.strftime("%H:%M:%S")
+
+
 def resolve_server_base_url(server_url: str) -> str:
     parsed = urlparse(server_url)
     if not parsed.scheme or not parsed.hostname:
@@ -69,7 +73,7 @@ def send_to_musetalk_api(http: requests.Session, server_url: str, wav_path: Path
     base = resolve_server_base_url(server_url)
     url = base.rstrip("/") + "/converse"
     print(
-        f"[client] POST {url} file={wav_path.name} session_id={session_id} "
+        f"[{ts()}] [client] POST {url} file={wav_path.name} session_id={session_id} "
         f"prefix={output_prefix} backend={reply_backend}"
     )
 
@@ -80,15 +84,15 @@ def send_to_musetalk_api(http: requests.Session, server_url: str, wav_path: Path
         resp = http.post(url, files=files, data=data, timeout=1800)
     resp.raise_for_status()
     print(
-        f"[client] response status={resp.status_code} content-type={resp.headers.get('content-type')} "
+        f"[{ts()}] [client] response status={resp.status_code} content-type={resp.headers.get('content-type')} "
         f"roundtrip_ms={(time.time() - t_post) * 1000:.0f}"
     )
     student_text = unquote(resp.headers.get("X-Student-Text", ""))
     teacher_reply = unquote(resp.headers.get("X-Teacher-Reply", ""))
     if student_text:
-        print(f"[client] student={student_text}")
+        print(f"[{ts()}] [client] student={student_text}")
     if teacher_reply:
-        print(f"[client] teacher={teacher_reply}")
+        print(f"[{ts()}] [client] teacher={teacher_reply}")
 
     with open(out_video, "wb") as f:
         f.write(resp.content)
@@ -131,9 +135,9 @@ def main() -> None:
         normalized_wav = None
         try:
             if args.normalize_audio:
-                print("[client] normalize:start")
+                print(f"[{ts()}] [client] normalize:start")
                 normalized_wav, norm_msg = normalize_wav_for_upload(Path(audio_path))
-                print("[client] normalize:end")
+                print(f"[{ts()}] [client] normalize:end")
                 upload_wav = normalized_wav
             else:
                 norm_msg = "wav_norm: skipped (fast path)"

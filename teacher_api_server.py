@@ -117,20 +117,20 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 72)
-    print("MuseTalk Teacher API starting...")
-    print(f"Host: {args.host}:{args.port}")
-    print(f"Avatar ID: {args.avatar_id}")
-    print(f"Video path: {args.video_path}")
-    print(f"Output dir: {output_dir.resolve()}")
-    print(f"Whisper device: {args.whisper_device}")
-    print(f"Default reply backend: {args.reply_backend}")
-    print(f"Converse endpoint mode: backend-selectable per request")
+    print(f"[{time.strftime('%H:%M:%S')}] MuseTalk Teacher API starting...")
+    print(f"[{time.strftime('%H:%M:%S')}] Host: {args.host}:{args.port}")
+    print(f"[{time.strftime('%H:%M:%S')}] Avatar ID: {args.avatar_id}")
+    print(f"[{time.strftime('%H:%M:%S')}] Video path: {args.video_path}")
+    print(f"[{time.strftime('%H:%M:%S')}] Output dir: {output_dir.resolve()}")
+    print(f"[{time.strftime('%H:%M:%S')}] Whisper device: {args.whisper_device}")
+    print(f"[{time.strftime('%H:%M:%S')}] Default reply backend: {args.reply_backend}")
+    print(f"[{time.strftime('%H:%M:%S')}] Converse endpoint mode: backend-selectable per request")
     print("=" * 72)
 
-    print("Loading warm runtime...")
+    print(f"[{time.strftime('%H:%M:%S')}] Loading warm runtime...")
     t0 = time.time()
     models: RuntimeModels = load_runtime(args)
-    print(f"Runtime loaded in {time.time() - t0:.2f}s")
+    print(f"[{time.strftime('%H:%M:%S')}] Runtime loaded in {time.time() - t0:.2f}s")
 
     avatar = AvatarCache(
         base_dir=Path("./results/v15/avatars"),
@@ -139,10 +139,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         parsing_mode=args.parsing_mode,
         extra_margin=args.extra_margin,
     )
-    print("Preparing/loading avatar...")
+    print(f"[{time.strftime('%H:%M:%S')}] Preparing/loading avatar...")
     t1 = time.time()
     avatar.prepare(models=models, batch_size=args.batch_size, force_recreate=args.prepare)
-    print(f"Avatar ready in {time.time() - t1:.2f}s")
+    print(f"[{time.strftime('%H:%M:%S')}] Avatar ready in {time.time() - t1:.2f}s")
 
     infer_lock = threading.Lock()
     chat_histories: Dict[str, List[Tuple[str, str]]] = {}
