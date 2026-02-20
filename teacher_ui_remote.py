@@ -1,72 +1,45 @@
 #!/usr/bin/env python3
 """
-Mac-side remote UI:
-- Student text -> Gemini
-- AI text -> pyttsx3 wav
-- Send wav to Windows MuseTalk API
+Mac-side remote UI (audio-only):
+- Record/upload wav
+- Send to Windows MuseTalk API /generate
 - Receive and display mp4 reply
 """
 
 import argparse
-import os
+import socket
 import tempfile
 import time
 from pathlib import Path
-from typing import List, Tuple
+from urllib.parse import urlparse
 
 import gradio as gr
 import requests
 
-def synthesize_pyttsx3(text: str, out_wav: Path, rate: int, voice: str | None) -> Path:
-    import pyttsx3
 
-    engine = pyttsx3.init()
-    if rate > 0:
-        engine.setProperty("rate", rate)
-    if voice:
-        engine.setProperty("voice", voice)
-    engine.save_to_file(text, str(out_wav))
-    engine.runAndWait()
-    return out_wav
+def resolve_server_base_url(server_url: str) -> str:
+    parsed = urlparse(server_url)
+    if not parsed.scheme or not parsed.hostname:
+        return server_url
 
+    try:
+        ip = socket.gethostbyname(parsed.hostname)
+    except Exception:
+        return server_url
 
-def chat_gemini(
-    student_text: str,
-    history: List[Tuple[str, str]],
-    model: str,
-    api_key: str,
-    system_prompt: str,
-    timeout_s: int = 60,
-) -> str:
-    if not api_key:
-        raise RuntimeError("Missing Gemini API key. Set --gemini_api_key or GEMINI_API_KEY.")
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    prompt_parts = [system_prompt.strip(), "\n\nConversation so far:\n"]
-    for u, a in history:
-        prompt_parts.append(f"Student: {u}\nTeacher: {a}\n")
-    prompt_parts.append(f"Student: {student_text}\nTeacher:")
-    prompt = "".join(prompt_parts)
-
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    resp = requests.post(url, params={"key": api_key}, json=payload, timeout=timeout_s)
-    resp.raise_for_status()
-    data = resp.json()
-
-    candidates = data.get("candidates", [])
-    if not candidates:
-        raise RuntimeError(f"Gemini returned no candidates: {data}")
-    parts = candidates[0].get("content", {}).get("parts", [])
-    return "".join(p.get("text", "") for p in parts).strip()
+    if parsed.port:
+        return f"{parsed.scheme}://{ip}:{parsed.port}"
+    return f"{parsed.scheme}://{ip}"
 
 
 def send_to_musetalk_api(server_url: str, wav_path: Path, output_prefix: str) -> Path:
     out_dir = Path(tempfile.mkdtemp(prefix="remote_musetalk_video_"))
     out_video = out_dir / "reply.mp4"
-    url = server_url.rstrip("/") + "/generate"
+    base = resolve_server_base_url(server_url)
+    url = base.rstrip("/") + "/generate"
 
     with open(wav_path, "rb") as f:
-        files = {"audio": ("input.wav", f, "audio/wav")}
+        files = {"audio": (wav_path.name, f, "audio/wav")}
         data = {"output_prefix": output_prefix}
         resp = requests.post(url, files=files, data=data, timeout=1800)
     resp.raise_for_status()
@@ -77,23 +50,10 @@ def send_to_musetalk_api(server_url: str, wav_path: Path, output_prefix: str) ->
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Remote MuseTalk UI (Gemini + Windows API)")
+    parser = argparse.ArgumentParser(description="Remote MuseTalk UI (audio-only)")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=7863)
-    parser.add_argument("--musetalk_server", required=True, help="Example: http://192.168.1.10:8787")
-
-    parser.add_argument("--gemini_model", default="gemini-2.5-flash")
-    parser.add_argument("--gemini_api_key", default=os.getenv("GEMINI_API_KEY", ""))
-    parser.add_argument(
-        "--system_prompt",
-        default=(
-            "You are an English teacher. Keep replies short (1-3 sentences), "
-            "friendly, and correct grammar naturally. Ask one follow-up question."
-        ),
-    )
-
-    parser.add_argument("--tts_rate", type=int, default=170)
-    parser.add_argument("--tts_voice", default=None)
+    parser.add_argument("--musetalk_server", required=True, help="Example: http://markinova.local:8787")
     parser.add_argument("--output_prefix", default="teacher_reply")
     return parser
 
@@ -101,71 +61,129 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
 
-    def generate_reply(student_text: str, history: List[List[str]]):
-        history = history or []
-        if not student_text or not student_text.strip():
-            return history, None, "Enter student text."
+    def generate_from_audio(audio_path: str):
+        if not audio_path:
+            return None, "Record or upload a .wav file first."
+        if not audio_path.lower().endswith(".wav"):
+            return None, "Only .wav is supported by the current server."
 
         start = time.time()
-        tuple_history = [(x[0], x[1]) for x in history if len(x) == 2]
-
         try:
-            ai_text = chat_gemini(
-                student_text=student_text.strip(),
-                history=tuple_history,
-                model=args.gemini_model,
-                api_key=args.gemini_api_key,
-                system_prompt=args.system_prompt,
+            out_video = send_to_musetalk_api(
+                server_url=args.musetalk_server,
+                wav_path=Path(audio_path),
+                output_prefix=args.output_prefix,
             )
-            if not ai_text:
-                ai_text = "I could not generate a response. Please try again."
-
-            wav_tmp = Path(tempfile.mkdtemp(prefix="remote_musetalk_tts_")) / "reply.wav"
-            synthesize_pyttsx3(ai_text, wav_tmp, args.tts_rate, args.tts_voice)
-
-            out_video = send_to_musetalk_api(args.musetalk_server, wav_tmp, args.output_prefix)
-            history.append([student_text, ai_text])
-
-            took = time.time() - start
-            return history, str(out_video), f"Turn done in {took:.2f}s"
+            return str(out_video), f"Done in {time.time() - start:.2f}s"
         except Exception as exc:
-            return history, None, f"Error: {exc}"
+            return None, f"Error: {exc}"
 
-    with gr.Blocks(title="AI English Teacher (Remote MuseTalk)") as demo:
-        gr.Markdown("## AI English Teacher (Gemini on this machine, MuseTalk on Windows)")
-        with gr.Row():
-            with gr.Column(scale=2):
-                chatbot = gr.Chatbot(label="Conversation", height=420)
-                student_text = gr.Textbox(
-                    label="Student Input",
-                    placeholder="Type what the student says...",
-                    lines=3,
-                )
-                with gr.Row():
-                    send_btn = gr.Button("Send")
-                    clear_btn = gr.Button("Clear Chat")
-                status = gr.Textbox(label="Status", interactive=False)
-            with gr.Column(scale=1):
-                video = gr.Video(label="Teacher Video Reply")
-                gr.Markdown(
-                    f"MuseTalk server: `{args.musetalk_server}`  \n"
-                    f"Gemini model: `{args.gemini_model}`"
-                )
+    css = """
+    :root {
+      --bg-a: #1b2735;
+      --bg-b: #090a0f;
+      --bg-c: #050507;
+      --glass: rgba(12, 16, 24, 0.7);
+      --line: rgba(255, 255, 255, 0.16);
+      --text: #f5f7ff;
+      --accent-a: #22d3ee;
+      --accent-b: #5eead4;
+    }
+    body, .gradio-container {
+      background: radial-gradient(1000px 600px at 10% 0%, var(--bg-a) 0%, var(--bg-b) 45%, var(--bg-c) 100%);
+    }
+    .gradio-container {
+      max-width: 100vw !important;
+      width: 100% !important;
+      margin: 0 !important;
+      padding: 10px !important;
+      min-height: 100vh;
+    }
+    #call_shell {
+      position: relative;
+      height: 94vh;
+      border-radius: 24px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      background: #06070a;
+    }
+    #teacher_video {
+      height: 100% !important;
+      min-height: 100% !important;
+    }
+    #teacher_video video {
+      width: 100% !important;
+      height: 100% !important;
+      object-fit: cover !important;
+    }
+    #controls_bar {
+      position: absolute;
+      left: 10px;
+      right: 10px;
+      bottom: 10px;
+      z-index: 20;
+      background: var(--glass);
+      backdrop-filter: blur(10px);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 8px;
+    }
+    #controls_bar label {display: none !important;}
+    #send_btn button {
+      border-radius: 10px !important;
+      height: 42px !important;
+      font-weight: 700 !important;
+      background: linear-gradient(135deg, var(--accent-b) 0%, var(--accent-a) 100%) !important;
+      color: #021015 !important;
+    }
+    #status_box textarea {
+      font-size: 12px !important;
+      min-height: 44px !important;
+    }
 
-        send_btn.click(
-            fn=generate_reply,
-            inputs=[student_text, chatbot],
-            outputs=[chatbot, video, status],
-        )
-        student_text.submit(
-            fn=generate_reply,
-            inputs=[student_text, chatbot],
-            outputs=[chatbot, video, status],
-        )
-        clear_btn.click(
-            fn=lambda: ([], None, "Cleared."),
-            inputs=None,
-            outputs=[chatbot, video, status],
+    /* Small screens: WhatsApp/FaceTime style */
+    @media (max-width: 767px) {
+      .gradio-container {max-width: 430px !important; margin: 0 auto !important; padding: 6px !important;}
+      #call_shell {height: 95vh; border-radius: 22px;}
+    }
+
+    /* Large screens: Zoom/Meet style */
+    @media (min-width: 1024px) {
+      .gradio-container {padding: 18px !important;}
+      #call_shell {
+        height: 88vh;
+        border-radius: 18px;
+        display: grid;
+        grid-template-columns: 1.75fr 0.9fr;
+      }
+      #teacher_video {
+        height: 100% !important;
+        border-right: 1px solid var(--line);
+      }
+      #controls_bar {
+        position: static;
+        margin: 14px;
+        align-self: end;
+      }
+    }
+    """
+
+    with gr.Blocks(title="Remote MuseTalk (Audio to Video)", css=css) as demo:
+        with gr.Column(elem_id="call_shell"):
+            video_out = gr.Video(label="Teacher", elem_id="teacher_video")
+            with gr.Column(elem_id="controls_bar"):
+                audio_in = gr.Audio(
+                    sources=["microphone", "upload"],
+                    type="filepath",
+                    label="Audio",
+                )
+                run_btn = gr.Button("Send", elem_id="send_btn")
+                status = gr.Textbox(label="Status", interactive=False, elem_id="status_box")
+
+        run_btn.click(
+            fn=generate_from_audio,
+            inputs=[audio_in],
+            outputs=[video_out, status],
         )
 
     demo.launch(server_name=args.host, server_port=args.port)
