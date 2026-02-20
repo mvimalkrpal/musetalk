@@ -7,9 +7,12 @@ Mac-side remote UI (audio-only):
 """
 
 import argparse
+import audioop
+import ipaddress
 import socket
 import tempfile
 import time
+import wave
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
@@ -23,6 +26,12 @@ def resolve_server_base_url(server_url: str) -> str:
         return server_url
 
     try:
+        ipaddress.ip_address(parsed.hostname)
+        return server_url
+    except ValueError:
+        pass
+
+    try:
         ip = socket.gethostbyname(parsed.hostname)
     except Exception:
         return server_url
@@ -32,7 +41,29 @@ def resolve_server_base_url(server_url: str) -> str:
     return f"{parsed.scheme}://{ip}"
 
 
-def send_to_musetalk_api(server_url: str, wav_path: Path, output_prefix: str, reply_backend: str, session_id: str):
+def normalize_wav_for_upload(wav_path: Path) -> tuple[Path, str]:
+    out_dir = Path(tempfile.mkdtemp(prefix="remote_musetalk_wav_"))
+    out_wav = out_dir / "input_16k_mono.wav"
+    with wave.open(str(wav_path), "rb") as r:
+        channels = r.getnchannels()
+        sampwidth = r.getsampwidth()
+        framerate = r.getframerate()
+        frames = r.readframes(r.getnframes())
+
+    if channels > 1:
+        frames = audioop.tomono(frames, sampwidth, 0.5, 0.5)
+    if framerate != 16000:
+        frames, _ = audioop.ratecv(frames, sampwidth, 1, framerate, 16000, None)
+
+    with wave.open(str(out_wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(sampwidth)
+        w.setframerate(16000)
+        w.writeframes(frames)
+    return out_wav, f"wav_norm: {channels}ch@{framerate}Hz -> 1ch@16000Hz"
+
+
+def send_to_musetalk_api(http: requests.Session, server_url: str, wav_path: Path, output_prefix: str, reply_backend: str, session_id: str):
     out_dir = Path(tempfile.mkdtemp(prefix="remote_musetalk_video_"))
     out_video = out_dir / f"reply_{reply_backend}.mp4"
     base = resolve_server_base_url(server_url)
@@ -45,7 +76,7 @@ def send_to_musetalk_api(server_url: str, wav_path: Path, output_prefix: str, re
     with open(wav_path, "rb") as f:
         files = {"audio": (wav_path.name, f, "audio/wav")}
         data = {"output_prefix": output_prefix, "session_id": session_id, "reply_backend": reply_backend}
-        resp = requests.post(url, files=files, data=data, timeout=1800)
+        resp = http.post(url, files=files, data=data, timeout=1800)
     resp.raise_for_status()
     print(f"[client] response status={resp.status_code} content-type={resp.headers.get('content-type')}")
     student_text = unquote(resp.headers.get("X-Student-Text", ""))
@@ -81,6 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    http = requests.Session()
 
     def generate_from_audio(audio_path: str, backends: list[str]):
         if not audio_path:
@@ -91,13 +123,16 @@ def main() -> None:
             return None, "Error: Select at least one backend."
 
         start = time.time()
+        normalized_wav = None
         try:
+            normalized_wav, norm_msg = normalize_wav_for_upload(Path(audio_path))
             primary_video = None
-            logs = []
+            logs = [norm_msg]
             for b in backends:
                 out_video, meta = send_to_musetalk_api(
+                    http=http,
                     server_url=args.musetalk_server,
-                    wav_path=Path(audio_path),
+                    wav_path=normalized_wav,
                     output_prefix=f"{args.output_prefix}_{b}",
                     reply_backend=b,
                     session_id=f"default_{b}",
@@ -116,6 +151,15 @@ def main() -> None:
             return primary_video, "\n".join(logs)
         except Exception as exc:
             return None, f"Error: {exc}"
+        finally:
+            if normalized_wav is not None:
+                try:
+                    parent = normalized_wav.parent
+                    if normalized_wav.exists():
+                        normalized_wav.unlink()
+                    parent.rmdir()
+                except Exception:
+                    pass
 
     css = """
     :root {
