@@ -73,12 +73,16 @@ def send_to_musetalk_api(http: requests.Session, server_url: str, wav_path: Path
         f"prefix={output_prefix} backend={reply_backend}"
     )
 
+    t_post = time.time()
     with open(wav_path, "rb") as f:
         files = {"audio": (wav_path.name, f, "audio/wav")}
         data = {"output_prefix": output_prefix, "session_id": session_id, "reply_backend": reply_backend}
         resp = http.post(url, files=files, data=data, timeout=1800)
     resp.raise_for_status()
-    print(f"[client] response status={resp.status_code} content-type={resp.headers.get('content-type')}")
+    print(
+        f"[client] response status={resp.status_code} content-type={resp.headers.get('content-type')} "
+        f"roundtrip_ms={(time.time() - t_post) * 1000:.0f}"
+    )
     student_text = unquote(resp.headers.get("X-Student-Text", ""))
     teacher_reply = unquote(resp.headers.get("X-Teacher-Reply", ""))
     if student_text:
@@ -125,7 +129,9 @@ def main() -> None:
         start = time.time()
         normalized_wav = None
         try:
+            print("[client] normalize:start")
             normalized_wav, norm_msg = normalize_wav_for_upload(Path(audio_path))
+            print("[client] normalize:end")
             primary_video = None
             logs = [norm_msg]
             for b in backends:

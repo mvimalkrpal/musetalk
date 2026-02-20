@@ -147,6 +147,12 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     infer_lock = threading.Lock()
     chat_histories: Dict[str, List[Tuple[str, str]]] = {}
 
+    @app.middleware("http")
+    async def request_entry_logger(request: Request, call_next):
+        client = request.client.host if request.client else "-"
+        print(f"[{time.strftime('%H:%M:%S')}] RECV {request.method} {request.url.path} from {client}")
+        return await call_next(request)
+
     gemini_key = args.gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
 
     def transcribe_with_gemini(wav_path: Path) -> str:

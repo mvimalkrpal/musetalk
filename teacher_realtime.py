@@ -31,7 +31,6 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 import torch
-from tqdm import tqdm
 from transformers import WhisperModel
 
 from musetalk.utils.audio_processor import AudioProcessor
@@ -191,7 +190,8 @@ class AvatarCache:
         self.mask_list_cycle = []
         self.mask_coords_list_cycle = []
 
-        for i, frame in enumerate(tqdm(self.frame_list_cycle, desc="Preparing masks")):
+        print(f"[avatar:{self.avatar_id}] prepare_masks:start total={len(self.frame_list_cycle)}")
+        for i, frame in enumerate(self.frame_list_cycle):
             cv2.imwrite(str(self.full_imgs_path / f"{i:08d}.png"), frame)
             x1, y1, x2, y2 = self.coord_list_cycle[i]
             mask, crop_box = get_image_prepare_material(
@@ -203,6 +203,7 @@ class AvatarCache:
             cv2.imwrite(str(self.mask_path / f"{i:08d}.png"), mask)
             self.mask_list_cycle.append(mask)
             self.mask_coords_list_cycle.append(crop_box)
+        print(f"[avatar:{self.avatar_id}] prepare_masks:end")
 
         with open(self.coords_path, "wb") as f:
             pickle.dump(self.coord_list_cycle, f)
@@ -238,9 +239,9 @@ class AvatarCache:
 
         gen = datagen(whisper_chunks, self.input_latent_list_cycle, batch_size)
         frames = []
-        for whisper_batch, latent_batch in tqdm(
-            gen, total=int(np.ceil(float(len(whisper_chunks)) / batch_size)), desc="Generating"
-        ):
+        total_gen_steps = int(np.ceil(float(len(whisper_chunks)) / batch_size))
+        print(f"[avatar:{self.avatar_id}] generate_latents:start steps={total_gen_steps}")
+        for whisper_batch, latent_batch in gen:
             audio_feature_batch = models.pe(
                 whisper_batch.to(device=models.device, dtype=models.unet.model.dtype)
             )
@@ -251,13 +252,15 @@ class AvatarCache:
             pred_latents = pred_latents.to(device=models.device, dtype=models.vae.vae.dtype)
             recon = models.vae.decode_latents(pred_latents)
             frames.extend(recon)
+        print(f"[avatar:{self.avatar_id}] generate_latents:end frames={len(frames)}")
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_dir = Path(tempfile.mkdtemp(prefix="musetalk_teacher_"))
         silent_video = tmp_dir / "silent.mp4"
 
         try:
-            for idx, res_frame in enumerate(tqdm(frames, desc="Blending")):
+            print(f"[avatar:{self.avatar_id}] blending:start frames={len(frames)}")
+            for idx, res_frame in enumerate(frames):
                 bbox = self.coord_list_cycle[idx % len(self.coord_list_cycle)]
                 ori = self.frame_list_cycle[idx % len(self.frame_list_cycle)].copy()
                 x1, y1, x2, y2 = bbox
@@ -267,7 +270,9 @@ class AvatarCache:
                 mask_crop_box = self.mask_coords_list_cycle[idx % len(self.mask_coords_list_cycle)]
                 combined = get_image_blending(ori, resized, bbox, mask, mask_crop_box)
                 cv2.imwrite(str(tmp_dir / f"{idx:08d}.png"), combined)
+            print(f"[avatar:{self.avatar_id}] blending:end")
 
+            print(f"[avatar:{self.avatar_id}] ffmpeg_img2video:start")
             cmd_img2video = [
                 "ffmpeg", "-y", "-v", "warning",
                 "-r", str(fps),
@@ -279,7 +284,9 @@ class AvatarCache:
                 str(silent_video),
             ]
             subprocess.run(cmd_img2video, check=True)
+            print(f"[avatar:{self.avatar_id}] ffmpeg_img2video:end")
 
+            print(f"[avatar:{self.avatar_id}] ffmpeg_mux:start")
             cmd_mux = [
                 "ffmpeg", "-y", "-v", "warning",
                 "-i", audio_path,
@@ -288,6 +295,7 @@ class AvatarCache:
                 str(output_path),
             ]
             subprocess.run(cmd_mux, check=True)
+            print(f"[avatar:{self.avatar_id}] ffmpeg_mux:end")
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
