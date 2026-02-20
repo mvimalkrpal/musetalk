@@ -78,13 +78,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--extra_margin", type=int, default=10)
     parser.add_argument("--gemini_api_key", type=str, default="")
     parser.add_argument("--gemini_model", type=str, default="gemini-2.5-flash")
+    parser.add_argument("--reply_backend", type=str, choices=["gemini", "ollama"], default="gemini")
     parser.add_argument("--ollama_endpoint", type=str, default="http://127.0.0.1:11434")
     parser.add_argument("--ollama_model", type=str, default="llama3.2:1b")
     parser.add_argument(
         "--system_prompt",
         type=str,
         default=(
-            "You are an English teacher. Reply in 1-2 short sentences and ask one short follow-up question."
+            "You are a strict English teacher. Be concise and instructional. "
+            "Correct grammar and word choice clearly. "
+            "Do not use emojis or casual filler. "
+            "Format each reply as: "
+            "1) Correction: <corrected sentence> "
+            "2) Why: <brief rule/explanation> "
+            "3) Practice: <one short follow-up prompt>."
         ),
     )
     parser.add_argument("--tts_rate", type=int, default=170)
@@ -176,6 +183,34 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         chat_histories[session_id] = hist
         return reply
 
+    def reply_with_gemini(student_text: str, session_id: str) -> str:
+        if not gemini_key:
+            raise RuntimeError("GEMINI_API_KEY missing on server for Gemini reply.")
+        hist = chat_histories.get(session_id, [])
+        prompt_lines = [args.system_prompt, "", "Conversation so far:"]
+        for u, a in hist[-8:]:
+            prompt_lines.append(f"Student: {u}")
+            prompt_lines.append(f"Teacher: {a}")
+        prompt_lines.append(f"Student: {student_text}")
+        prompt_lines.append("Teacher:")
+        prompt = "\n".join(prompt_lines)
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{args.gemini_model}:generateContent"
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        resp = requests.post(url, params={"key": gemini_key}, json=payload, timeout=90)
+        resp.raise_for_status()
+        data = resp.json()
+        candidates = data.get("candidates", [])
+        if not candidates:
+            raise RuntimeError(f"Gemini reply returned no candidates: {data}")
+        parts = candidates[0].get("content", {}).get("parts", [])
+        reply = "".join(p.get("text", "") for p in parts).strip()
+        if not reply:
+            raise RuntimeError("Gemini returned empty response.")
+        hist.append((student_text, reply))
+        chat_histories[session_id] = hist
+        return reply
+
     def synthesize_tts_windows(text: str, out_wav: Path) -> None:
         import pyttsx3
 
@@ -259,11 +294,15 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         audio: UploadFile = File(...),
         session_id: str = Form(default="default"),
         output_prefix: str = Form(default=args.output_prefix),
+        reply_backend: str = Form(default=""),
     ):
         req_start = time.time()
+        effective_backend = (reply_backend or args.reply_backend).strip().lower()
+        if effective_backend not in {"gemini", "ollama"}:
+            return JSONResponse(status_code=400, content={"error": "reply_backend must be 'gemini' or 'ollama'."})
         print(
             f"[{time.strftime('%H:%M:%S')}] POST /converse "
-            f"filename={audio.filename} session_id={session_id} prefix={output_prefix}"
+            f"filename={audio.filename} session_id={session_id} prefix={output_prefix} backend={effective_backend}"
         )
         if not audio.filename.lower().endswith(".wav"):
             return JSONResponse(status_code=400, content={"error": "Only wav files are supported."})
@@ -283,7 +322,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 stt_ms = (time.time() - t0) * 1000
 
                 t1 = time.time()
-                teacher_reply = reply_with_ollama(student_text, session_id)
+                if effective_backend == "gemini":
+                    teacher_reply = reply_with_gemini(student_text, session_id)
+                else:
+                    teacher_reply = reply_with_ollama(student_text, session_id)
                 llm_ms = (time.time() - t1) * 1000
 
                 t2 = time.time()
@@ -306,11 +348,18 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 f"[{time.strftime('%H:%M:%S')}] /converse timings: "
                 f"stt={stt_ms:.0f}ms llm={llm_ms:.0f}ms tts={tts_ms:.0f}ms render={render_ms:.0f}ms"
             )
+            print(f"[{time.strftime('%H:%M:%S')}] reply_backend='{effective_backend}'")
             print(f"[{time.strftime('%H:%M:%S')}] student='{student_text}'")
             print(f"[{time.strftime('%H:%M:%S')}] teacher='{teacher_reply}'")
             print(f"[{time.strftime('%H:%M:%S')}] POST /converse done in {time.time() - req_start:.2f}s")
 
             headers = {
+                "X-Reply-Backend": effective_backend,
+                "X-Stt-Ms": str(int(stt_ms)),
+                "X-Llm-Ms": str(int(llm_ms)),
+                "X-Tts-Ms": str(int(tts_ms)),
+                "X-Render-Ms": str(int(render_ms)),
+                "X-Total-Ms": str(int(stt_ms + llm_ms + tts_ms + render_ms)),
                 "X-Student-Text": quote(student_text[:1000]),
                 "X-Teacher-Reply": quote(teacher_reply[:1000]),
             }

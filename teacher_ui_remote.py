@@ -11,7 +11,7 @@ import socket
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 import gradio as gr
 import requests
@@ -32,21 +32,42 @@ def resolve_server_base_url(server_url: str) -> str:
     return f"{parsed.scheme}://{ip}"
 
 
-def send_to_musetalk_api(server_url: str, wav_path: Path, output_prefix: str) -> Path:
+def send_to_musetalk_api(server_url: str, wav_path: Path, output_prefix: str, reply_backend: str, session_id: str):
     out_dir = Path(tempfile.mkdtemp(prefix="remote_musetalk_video_"))
-    out_video = out_dir / "reply.mp4"
+    out_video = out_dir / f"reply_{reply_backend}.mp4"
     base = resolve_server_base_url(server_url)
-    url = base.rstrip("/") + "/generate"
+    url = base.rstrip("/") + "/converse"
+    print(
+        f"[client] POST {url} file={wav_path.name} session_id={session_id} "
+        f"prefix={output_prefix} backend={reply_backend}"
+    )
 
     with open(wav_path, "rb") as f:
         files = {"audio": (wav_path.name, f, "audio/wav")}
-        data = {"output_prefix": output_prefix}
+        data = {"output_prefix": output_prefix, "session_id": session_id, "reply_backend": reply_backend}
         resp = requests.post(url, files=files, data=data, timeout=1800)
     resp.raise_for_status()
+    print(f"[client] response status={resp.status_code} content-type={resp.headers.get('content-type')}")
+    student_text = unquote(resp.headers.get("X-Student-Text", ""))
+    teacher_reply = unquote(resp.headers.get("X-Teacher-Reply", ""))
+    if student_text:
+        print(f"[client] student={student_text}")
+    if teacher_reply:
+        print(f"[client] teacher={teacher_reply}")
 
     with open(out_video, "wb") as f:
         f.write(resp.content)
-    return out_video
+    meta = {
+        "backend": resp.headers.get("X-Reply-Backend", reply_backend),
+        "student": student_text,
+        "reply": teacher_reply,
+        "stt_ms": resp.headers.get("X-Stt-Ms", ""),
+        "llm_ms": resp.headers.get("X-Llm-Ms", ""),
+        "tts_ms": resp.headers.get("X-Tts-Ms", ""),
+        "render_ms": resp.headers.get("X-Render-Ms", ""),
+        "total_ms": resp.headers.get("X-Total-Ms", ""),
+    }
+    return out_video, meta
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,22 +82,45 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
 
-    def generate_from_audio(audio_path: str):
+    def generate_from_audio(audio_path: str, backends: list[str]):
         if not audio_path:
-            return None, "Record or upload a .wav file first."
+            return None, None, [["error", "-", "-", "-", "-", "-", "-", "Record or upload a .wav file first."]], "No request sent."
         if not audio_path.lower().endswith(".wav"):
-            return None, "Only .wav is supported by the current server."
+            return None, None, [["error", "-", "-", "-", "-", "-", "-", "Only .wav is supported by the current server."]], "No request sent."
+        if not backends:
+            return None, None, [["error", "-", "-", "-", "-", "-", "-", "Select at least one backend."]], "No request sent."
 
         start = time.time()
         try:
-            out_video = send_to_musetalk_api(
-                server_url=args.musetalk_server,
-                wav_path=Path(audio_path),
-                output_prefix=args.output_prefix,
-            )
-            return str(out_video), f"Done in {time.time() - start:.2f}s"
+            gemini_video = None
+            ollama_video = None
+            table_rows = []
+            for b in backends:
+                out_video, meta = send_to_musetalk_api(
+                    server_url=args.musetalk_server,
+                    wav_path=Path(audio_path),
+                    output_prefix=f"{args.output_prefix}_{b}",
+                    reply_backend=b,
+                    session_id=f"default_{b}",
+                )
+                if b == "gemini":
+                    gemini_video = str(out_video)
+                if b == "ollama":
+                    ollama_video = str(out_video)
+                table_rows.append(
+                    [
+                        meta["backend"],
+                        meta["stt_ms"],
+                        meta["llm_ms"],
+                        meta["tts_ms"],
+                        meta["render_ms"],
+                        meta["total_ms"],
+                        meta["reply"],
+                    ]
+                )
+            return gemini_video, ollama_video, table_rows, f"Done in {time.time() - start:.2f}s"
         except Exception as exc:
-            return None, f"Error: {exc}"
+            return None, None, [["error", "-", "-", "-", "-", "-", "-", str(exc)]], f"Error: {exc}"
 
     css = """
     :root {
@@ -116,8 +160,8 @@ def main() -> None:
       height: 100% !important;
       object-fit: cover !important;
     }
-    #controls_bar {
-      position: absolute;
+      #controls_bar {
+        position: absolute;
       left: 10px;
       right: 10px;
       bottom: 10px;
@@ -136,10 +180,8 @@ def main() -> None:
       background: linear-gradient(135deg, var(--accent-b) 0%, var(--accent-a) 100%) !important;
       color: #021015 !important;
     }
-    #status_box textarea {
-      font-size: 12px !important;
-      min-height: 44px !important;
-    }
+    #compare_box table {font-size: 12px !important;}
+    #compare_box .table-wrap {max-height: 130px; overflow-y: auto;}
 
     /* Small screens: WhatsApp/FaceTime style */
     @media (max-width: 767px) {
@@ -154,9 +196,9 @@ def main() -> None:
         height: 88vh;
         border-radius: 18px;
         display: grid;
-        grid-template-columns: 1.75fr 0.9fr;
+        grid-template-columns: 1.4fr 1.4fr 0.9fr;
       }
-      #teacher_video {
+      #gemini_video, #ollama_video {
         height: 100% !important;
         border-right: 1px solid var(--line);
       }
@@ -170,20 +212,36 @@ def main() -> None:
 
     with gr.Blocks(title="Remote MuseTalk (Audio to Video)", css=css) as demo:
         with gr.Column(elem_id="call_shell"):
-            video_out = gr.Video(label="Teacher", elem_id="teacher_video")
+            gemini_video = gr.Video(label="Gemini", elem_id="gemini_video")
+            ollama_video = gr.Video(label="Ollama", elem_id="ollama_video")
             with gr.Column(elem_id="controls_bar"):
+                backend_sel = gr.CheckboxGroup(
+                    choices=["gemini", "ollama"],
+                    value=["gemini", "ollama"],
+                    label="Brain",
+                )
                 audio_in = gr.Audio(
                     sources=["microphone", "upload"],
                     type="filepath",
                     label="Audio",
                 )
                 run_btn = gr.Button("Send", elem_id="send_btn")
-                status = gr.Textbox(label="Status", interactive=False, elem_id="status_box")
+                compare = gr.Dataframe(
+                    headers=["backend", "stt_ms", "llm_ms", "tts_ms", "render_ms", "total_ms", "reply"],
+                    datatype=["str", "str", "str", "str", "str", "str", "str"],
+                    row_count=(2, "dynamic"),
+                    col_count=(7, "fixed"),
+                    interactive=False,
+                    wrap=True,
+                    elem_id="compare_box",
+                    label="Comparison",
+                )
+                status = gr.Textbox(label="Status", interactive=False)
 
         run_btn.click(
             fn=generate_from_audio,
-            inputs=[audio_in],
-            outputs=[video_out, status],
+            inputs=[audio_in, backend_sel],
+            outputs=[gemini_video, ollama_video, compare, status],
         )
 
     demo.launch(server_name=args.host, server_port=args.port)
