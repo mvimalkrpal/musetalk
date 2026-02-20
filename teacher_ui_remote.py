@@ -111,6 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=7863)
     parser.add_argument("--musetalk_server", required=True, help="Example: http://markinova.local:8787")
     parser.add_argument("--output_prefix", default="teacher_reply")
+    parser.add_argument("--normalize_audio", action="store_true", help="Normalize client audio to mono 16k before upload")
     return parser
 
 
@@ -129,16 +130,21 @@ def main() -> None:
         start = time.time()
         normalized_wav = None
         try:
-            print("[client] normalize:start")
-            normalized_wav, norm_msg = normalize_wav_for_upload(Path(audio_path))
-            print("[client] normalize:end")
+            if args.normalize_audio:
+                print("[client] normalize:start")
+                normalized_wav, norm_msg = normalize_wav_for_upload(Path(audio_path))
+                print("[client] normalize:end")
+                upload_wav = normalized_wav
+            else:
+                norm_msg = "wav_norm: skipped (fast path)"
+                upload_wav = Path(audio_path)
             primary_video = None
             logs = [norm_msg]
             for b in backends:
                 out_video, meta = send_to_musetalk_api(
                     http=http,
                     server_url=args.musetalk_server,
-                    wav_path=normalized_wav,
+                    wav_path=upload_wav,
                     output_prefix=f"{args.output_prefix}_{b}",
                     reply_backend=b,
                     session_id=f"default_{b}",
