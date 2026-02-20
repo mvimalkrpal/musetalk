@@ -287,17 +287,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     if inline is None or getattr(inline, "data", None) is None:
                         continue
                     mime = str(getattr(inline, "mime_type", "")).lower()
-                    print(f"[{time.strftime('%H:%M:%S')}] gemini_live: part mime={mime}")
                     data = inline.data
                     if isinstance(data, str):
                         data = base64.b64decode(data)
                     if "audio/pcm" in mime:
                         audio_chunks.append(data)
-                if getattr(server_content.model_turn, "parts", None):
-                    for part in server_content.model_turn.parts or []:
-                        if getattr(part, "text", None):
-                            transcript = part.text
-
             if server_content and getattr(server_content, "output_transcription", None):
                 out_tx = server_content.output_transcription
                 if getattr(out_tx, "text", None):
@@ -483,7 +477,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     llm_ms = (time.time() - t1) * 1000
                     print(f"[{time.strftime('%H:%M:%S')}] /converse gemini_live_audio_ms={llm_ms:.0f}")
                     student_text = "(gemini_live input audio)"
-                    teacher_reply = live_transcript or "(gemini_live output audio)"
+                    teacher_reply = "(gemini_live output audio)"
                     pcm24k_to_wav_file(live_pcm, reply_wav)
                 else:
                     t0 = time.time()
@@ -524,8 +518,12 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 f"total={( _now_ms() - t_req_ms):.0f}ms"
             )
             print(f"[{time.strftime('%H:%M:%S')}] reply_backend='{effective_backend}'")
-            print(f"[{time.strftime('%H:%M:%S')}] student='{student_text}'")
-            print(f"[{time.strftime('%H:%M:%S')}] teacher='{teacher_reply}'")
+            if effective_backend == "gemini_live":
+                print(f"[{time.strftime('%H:%M:%S')}] student='(audio input only)'")
+                print(f"[{time.strftime('%H:%M:%S')}] teacher='(audio output only)'")
+            else:
+                print(f"[{time.strftime('%H:%M:%S')}] student='{student_text}'")
+                print(f"[{time.strftime('%H:%M:%S')}] teacher='{teacher_reply}'")
             print(f"[{time.strftime('%H:%M:%S')}] POST /converse done in {time.time() - req_start:.2f}s")
 
             headers = {

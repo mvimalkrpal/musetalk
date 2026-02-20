@@ -84,17 +84,16 @@ def main() -> None:
 
     def generate_from_audio(audio_path: str, backends: list[str]):
         if not audio_path:
-            return None, None, [["error", "-", "-", "-", "-", "-", "-", "Record or upload a .wav file first."]], "No request sent."
+            return None, "Error: Record or upload a .wav file first."
         if not audio_path.lower().endswith(".wav"):
-            return None, None, [["error", "-", "-", "-", "-", "-", "-", "Only .wav is supported by the current server."]], "No request sent."
+            return None, "Error: Only .wav is supported by the current server."
         if not backends:
-            return None, None, [["error", "-", "-", "-", "-", "-", "-", "Select at least one backend."]], "No request sent."
+            return None, "Error: Select at least one backend."
 
         start = time.time()
         try:
-            gemini_video = None
-            ollama_video = None
-            table_rows = []
+            primary_video = None
+            logs = []
             for b in backends:
                 out_video, meta = send_to_musetalk_api(
                     server_url=args.musetalk_server,
@@ -103,24 +102,20 @@ def main() -> None:
                     reply_backend=b,
                     session_id=f"default_{b}",
                 )
-                if b == "gemini":
-                    gemini_video = str(out_video)
-                if b == "ollama":
-                    ollama_video = str(out_video)
-                table_rows.append(
-                    [
-                        meta["backend"],
-                        meta["stt_ms"],
-                        meta["llm_ms"],
-                        meta["tts_ms"],
-                        meta["render_ms"],
-                        meta["total_ms"],
-                        meta["reply"],
-                    ]
-                )
-            return gemini_video, ollama_video, table_rows, f"Done in {time.time() - start:.2f}s"
+                if primary_video is None:
+                    primary_video = str(out_video)
+                if meta["backend"] == "gemini_live":
+                    logs.append(
+                        f"[{meta['backend']}] ok total={meta['total_ms']}ms render={meta['render_ms']}ms (audio-in/audio-out)"
+                    )
+                else:
+                    logs.append(
+                        f"[{meta['backend']}] ok total={meta['total_ms']}ms render={meta['render_ms']}ms reply={meta['reply'][:140]}"
+                    )
+            logs.append(f"Done in {time.time() - start:.2f}s")
+            return primary_video, "\n".join(logs)
         except Exception as exc:
-            return None, None, [["error", "-", "-", "-", "-", "-", "-", str(exc)]], f"Error: {exc}"
+            return None, f"Error: {exc}"
 
     css = """
     :root {
@@ -179,27 +174,26 @@ def main() -> None:
       background: linear-gradient(135deg, var(--accent-b) 0%, var(--accent-a) 100%) !important;
       color: #021015 !important;
     }
-    #compare_box table {font-size: 12px !important;}
-    #compare_box .table-wrap {max-height: 130px; overflow-y: auto;}
+    #status_box textarea {font-size: 12px !important; line-height: 1.35 !important;}
 
     /* Small screens: WhatsApp/FaceTime style */
     @media (max-width: 767px) {
       .gradio-container {max-width: 430px !important; margin: 0 auto !important; padding: 6px !important;}
       #call_shell {min-height: 130vh; border-radius: 22px; padding-bottom: 220px;}
-      #gemini_video, #ollama_video {height: 44vh !important;}
+      #teacher_video {height: 44vh !important;}
     }
 
     /* Large screens: Zoom/Meet style */
     @media (min-width: 1024px) {
-      .gradio-container {padding: 18px !important;}
+        .gradio-container {padding: 18px !important;}
       #call_shell {
         min-height: 88vh;
         border-radius: 18px;
         display: grid;
-        grid-template-columns: 1fr 1fr 360px;
+        grid-template-columns: 1fr 360px;
         align-items: stretch;
       }
-      #gemini_video, #ollama_video {
+      #teacher_video {
         height: 88vh !important;
         border-right: 1px solid var(--line);
       }
@@ -217,8 +211,7 @@ def main() -> None:
 
     with gr.Blocks(title="Remote MuseTalk (Audio to Video)", css=css) as demo:
         with gr.Column(elem_id="call_shell"):
-            gemini_video = gr.Video(label="Gemini", elem_id="gemini_video")
-            ollama_video = gr.Video(label="Ollama", elem_id="ollama_video")
+            teacher_video = gr.Video(label="Teacher", elem_id="teacher_video")
             with gr.Column(elem_id="controls_bar"):
                 backend_sel = gr.CheckboxGroup(
                     choices=["gemini_live", "gemini", "ollama"],
@@ -231,22 +224,12 @@ def main() -> None:
                     label="Audio",
                 )
                 run_btn = gr.Button("Send", elem_id="send_btn")
-                compare = gr.Dataframe(
-                    headers=["backend", "stt_ms", "llm_ms", "tts_ms", "render_ms", "total_ms", "reply"],
-                    datatype=["str", "str", "str", "str", "str", "str", "str"],
-                    row_count=(2, "dynamic"),
-                    col_count=(7, "fixed"),
-                    interactive=False,
-                    wrap=True,
-                    elem_id="compare_box",
-                    label="Comparison",
-                )
-                status = gr.Textbox(label="Status", interactive=False)
+                status = gr.Textbox(label="Response", interactive=False, lines=8, elem_id="status_box")
 
         run_btn.click(
             fn=generate_from_audio,
             inputs=[audio_in, backend_sel],
-            outputs=[gemini_video, ollama_video, compare, status],
+            outputs=[teacher_video, status],
         )
 
     demo.launch(server_name=args.host, server_port=args.port)
