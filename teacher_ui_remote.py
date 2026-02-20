@@ -17,7 +17,17 @@ from typing import List, Tuple
 import gradio as gr
 import requests
 
-from teacher_realtime import synthesize_pyttsx3
+def synthesize_pyttsx3(text: str, out_wav: Path, rate: int, voice: str | None) -> Path:
+    import pyttsx3
+
+    engine = pyttsx3.init()
+    if rate > 0:
+        engine.setProperty("rate", rate)
+    if voice:
+        engine.setProperty("voice", voice)
+    engine.save_to_file(text, str(out_wav))
+    engine.runAndWait()
+    return out_wav
 
 
 def chat_gemini(
@@ -163,4 +173,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
