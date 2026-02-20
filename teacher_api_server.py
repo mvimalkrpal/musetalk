@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gemini_live_model",
         type=str,
-        default="gemini-2.5-flash-preview-native-audio-dialog",
+        default="gemini-2.5-flash-native-audio-preview-09-2025",
     )
     parser.add_argument(
         "--system_prompt",
@@ -279,25 +279,39 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
         pcm_in = wav_to_pcm16k_bytes(student_wav)
         client = genai.Client(api_key=gemini_key)
-        cfg = {
-            "response_modalities": ["AUDIO"],
-            "system_instruction": args.system_prompt,
-        }
+        try:
+            modality_audio = getattr(types, "Modality").AUDIO
+        except Exception:
+            modality_audio = "AUDIO"
+
+        cfg = types.LiveConnectConfig(
+            response_modalities=[modality_audio],
+            system_instruction=args.system_prompt,
+        )
 
         audio_chunks: list[bytes] = []
         transcript = ""
         async with client.aio.live.connect(model=args.gemini_live_model, config=cfg) as session:
+            print(f"[{time.strftime('%H:%M:%S')}] gemini_live: sending {len(pcm_in)} bytes pcm16@16k")
             await session.send_realtime_input(
                 audio=types.Blob(data=pcm_in, mime_type="audio/pcm;rate=16000")
             )
             await session.send_client_content(
-                turns={"role": "user", "parts": [{"text": "Respond with one concise English-teacher correction."}]},
+                turns={"role": "user", "parts": [{"text": "Respond in spoken audio only. One concise correction."}]},
                 turn_complete=True,
             )
 
             async for msg in session.receive():
+                # Some SDK versions surface audio chunks directly on msg.data
+                direct = getattr(msg, "data", None)
+                if direct:
+                    if isinstance(direct, str):
+                        direct = base64.b64decode(direct)
+                    audio_chunks.append(direct)
+
                 server_content = getattr(msg, "server_content", None)
                 if server_content is None:
+                    print(f"[{time.strftime('%H:%M:%S')}] gemini_live: msg without server_content")
                     continue
 
                 model_turn = getattr(server_content, "model_turn", None)
@@ -307,6 +321,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         if inline is None or getattr(inline, "data", None) is None:
                             continue
                         mime = str(getattr(inline, "mime_type", "")).lower()
+                        print(f"[{time.strftime('%H:%M:%S')}] gemini_live: part mime={mime}")
                         if "audio/pcm" not in mime:
                             continue
                         data = inline.data
@@ -319,10 +334,17 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     transcript = out_tx.text
 
                 if getattr(server_content, "turn_complete", False):
+                    print(
+                        f"[{time.strftime('%H:%M:%S')}] gemini_live: turn_complete "
+                        f"chunks={len(audio_chunks)} transcript_len={len(transcript)}"
+                    )
                     break
 
         if not audio_chunks:
-            raise RuntimeError("Gemini Live returned no audio chunks.")
+            raise RuntimeError(
+                f"Gemini Live returned no audio chunks. transcript_len={len(transcript)} "
+                f"model={args.gemini_live_model}"
+            )
         return b"".join(audio_chunks), transcript
 
     @app.exception_handler(Exception)
