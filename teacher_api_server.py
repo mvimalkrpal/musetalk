@@ -269,6 +269,42 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         if not out_wav.exists() or out_wav.stat().st_size <= 44:
             raise RuntimeError("Failed to build reply wav from Gemini Live audio.")
 
+    async def _collect_live_audio_and_text(session) -> tuple[list[bytes], str]:
+        audio_chunks: list[bytes] = []
+        transcript = ""
+        turn = session.receive()
+        async for msg in turn:
+            direct = getattr(msg, "data", None)
+            if direct:
+                if isinstance(direct, str):
+                    direct = base64.b64decode(direct)
+                audio_chunks.append(direct)
+
+            server_content = getattr(msg, "server_content", None)
+            if server_content and getattr(server_content, "model_turn", None):
+                for part in server_content.model_turn.parts or []:
+                    inline = getattr(part, "inline_data", None)
+                    if inline is None or getattr(inline, "data", None) is None:
+                        continue
+                    mime = str(getattr(inline, "mime_type", "")).lower()
+                    print(f"[{time.strftime('%H:%M:%S')}] gemini_live: part mime={mime}")
+                    data = inline.data
+                    if isinstance(data, str):
+                        data = base64.b64decode(data)
+                    if "audio/pcm" in mime:
+                        audio_chunks.append(data)
+                if getattr(server_content.model_turn, "parts", None):
+                    for part in server_content.model_turn.parts or []:
+                        if getattr(part, "text", None):
+                            transcript = part.text
+
+            if server_content and getattr(server_content, "output_transcription", None):
+                out_tx = server_content.output_transcription
+                if getattr(out_tx, "text", None):
+                    transcript = out_tx.text
+
+        return audio_chunks, transcript
+
     async def reply_audio_with_gemini_live(student_wav: Path) -> tuple[bytes, str]:
         if not gemini_key:
             raise RuntimeError("GEMINI_API_KEY missing on server for Gemini Live.")
@@ -280,66 +316,42 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
         pcm_in = wav_to_pcm16k_bytes(student_wav)
         client = genai.Client(api_key=gemini_key, http_options={"api_version": args.gemini_live_api_version})
-        try:
-            modality_audio = getattr(types, "Modality").AUDIO
-        except Exception:
-            modality_audio = "AUDIO"
+        cfg = {
+            "response_modalities": ["AUDIO"],
+            "system_instruction": args.system_prompt,
+        }
 
-        cfg = types.LiveConnectConfig(
-            response_modalities=[modality_audio],
-            system_instruction=args.system_prompt,
-        )
-
-        audio_chunks: list[bytes] = []
-        transcript = ""
         async with client.aio.live.connect(model=args.gemini_live_model, config=cfg) as session:
             print(f"[{time.strftime('%H:%M:%S')}] gemini_live: sending {len(pcm_in)} bytes pcm16@16k")
+            # File-style one-shot audio: include explicit sample-rate mime and stream end.
             await session.send_realtime_input(
-                audio=types.Blob(data=pcm_in, mime_type="audio/pcm;rate=16000")
+                audio={"data": pcm_in, "mime_type": "audio/pcm;rate=16000"}
             )
-            await session.send_client_content(
-                turns={"role": "user", "parts": [{"text": "Respond in spoken audio only. One concise correction."}]},
-                turn_complete=True,
+            await session.send_realtime_input(audio_stream_end=True)
+            audio_chunks, transcript = await _collect_live_audio_and_text(session)
+
+            if not audio_chunks:
+                print(f"[{time.strftime('%H:%M:%S')}] gemini_live: fallback send_client_content")
+                await session.send_client_content(
+                    turns={
+                        "role": "user",
+                        "parts": [
+                            {
+                                "inline_data": {
+                                    "mime_type": "audio/pcm;rate=16000",
+                                    "data": base64.b64encode(pcm_in).decode("ascii"),
+                                }
+                            }
+                        ],
+                    },
+                    turn_complete=True,
+                )
+                audio_chunks, transcript = await _collect_live_audio_and_text(session)
+
+            print(
+                f"[{time.strftime('%H:%M:%S')}] gemini_live: receive_end "
+                f"chunks={len(audio_chunks)} transcript_len={len(transcript)}"
             )
-
-            async for msg in session.receive():
-                # Some SDK versions surface audio chunks directly on msg.data
-                direct = getattr(msg, "data", None)
-                if direct:
-                    if isinstance(direct, str):
-                        direct = base64.b64decode(direct)
-                    audio_chunks.append(direct)
-
-                server_content = getattr(msg, "server_content", None)
-                if server_content is None:
-                    print(f"[{time.strftime('%H:%M:%S')}] gemini_live: msg without server_content")
-                    continue
-
-                model_turn = getattr(server_content, "model_turn", None)
-                if model_turn is not None:
-                    for part in getattr(model_turn, "parts", []) or []:
-                        inline = getattr(part, "inline_data", None)
-                        if inline is None or getattr(inline, "data", None) is None:
-                            continue
-                        mime = str(getattr(inline, "mime_type", "")).lower()
-                        print(f"[{time.strftime('%H:%M:%S')}] gemini_live: part mime={mime}")
-                        if "audio/pcm" not in mime:
-                            continue
-                        data = inline.data
-                        if isinstance(data, str):
-                            data = base64.b64decode(data)
-                        audio_chunks.append(data)
-
-                out_tx = getattr(server_content, "output_transcription", None)
-                if out_tx is not None and getattr(out_tx, "text", None):
-                    transcript = out_tx.text
-
-                if getattr(server_content, "turn_complete", False):
-                    print(
-                        f"[{time.strftime('%H:%M:%S')}] gemini_live: turn_complete "
-                        f"chunks={len(audio_chunks)} transcript_len={len(transcript)}"
-                    )
-                    break
 
         if not audio_chunks:
             raise RuntimeError(
