@@ -14,7 +14,7 @@ mkdir %CheckpointsDir%\sd-vae-ft-mse
 mkdir %CheckpointsDir%\whisper
 
 :: Install required packages
-pip install -U "huggingface_hub[hf_xet]"
+pip install "huggingface_hub[hf_xet]==0.30.2"
 
 :: Set HuggingFace endpoint
 set HF_ENDPOINT=https://hf-mirror.com
