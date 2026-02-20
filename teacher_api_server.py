@@ -10,11 +10,13 @@ Runs warm MuseTalk runtime and exposes:
 import argparse
 import base64
 import os
+import subprocess
 import tempfile
 import threading
 import time
 import traceback
 import sys
+import wave
 from pathlib import Path
 from typing import Dict, List, Tuple
 from urllib.parse import quote
@@ -45,6 +47,10 @@ def _threading_excepthook(args):
 
 sys.excepthook = _sys_excepthook
 threading.excepthook = _threading_excepthook
+
+
+def _now_ms() -> float:
+    return time.perf_counter() * 1000.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,9 +84,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--extra_margin", type=int, default=10)
     parser.add_argument("--gemini_api_key", type=str, default="")
     parser.add_argument("--gemini_model", type=str, default="gemini-2.5-flash")
-    parser.add_argument("--reply_backend", type=str, choices=["gemini", "ollama"], default="gemini")
+    parser.add_argument("--reply_backend", type=str, choices=["gemini", "ollama", "gemini_live"], default="gemini_live")
     parser.add_argument("--ollama_endpoint", type=str, default="http://127.0.0.1:11434")
     parser.add_argument("--ollama_model", type=str, default="llama3.2:1b")
+    parser.add_argument(
+        "--gemini_live_model",
+        type=str,
+        default="gemini-2.5-flash-preview-native-audio-dialog",
+    )
     parser.add_argument(
         "--system_prompt",
         type=str,
@@ -111,6 +122,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     print(f"Video path: {args.video_path}")
     print(f"Output dir: {output_dir.resolve()}")
     print(f"Whisper device: {args.whisper_device}")
+    print(f"Default reply backend: {args.reply_backend}")
+    print(f"Converse endpoint mode: backend-selectable per request")
     print("=" * 72)
 
     print("Loading warm runtime...")
@@ -224,6 +237,94 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         if not out_wav.exists() or out_wav.stat().st_size <= 44:
             raise RuntimeError("TTS output wav is empty.")
 
+    def wav_to_pcm16k_bytes(in_wav: Path) -> bytes:
+        cmd = [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(in_wav),
+            "-f",
+            "s16le",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "pipe:1",
+        ]
+        p = subprocess.run(cmd, capture_output=True, check=True)
+        if not p.stdout:
+            raise RuntimeError("Failed to convert wav to pcm16.")
+        return p.stdout
+
+    def pcm24k_to_wav_file(pcm_bytes: bytes, out_wav: Path) -> None:
+        if not pcm_bytes:
+            raise RuntimeError("Gemini Live returned empty PCM bytes.")
+        with wave.open(str(out_wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)  # s16le
+            w.setframerate(24000)
+            w.writeframes(pcm_bytes)
+        if not out_wav.exists() or out_wav.stat().st_size <= 44:
+            raise RuntimeError("Failed to build reply wav from Gemini Live audio.")
+
+    async def reply_audio_with_gemini_live(student_wav: Path) -> tuple[bytes, str]:
+        if not gemini_key:
+            raise RuntimeError("GEMINI_API_KEY missing on server for Gemini Live.")
+        try:
+            from google import genai
+            from google.genai import types
+        except Exception as exc:
+            raise RuntimeError("Install google-genai for Gemini Live: pip install google-genai") from exc
+
+        pcm_in = wav_to_pcm16k_bytes(student_wav)
+        client = genai.Client(api_key=gemini_key)
+        cfg = {
+            "response_modalities": ["AUDIO"],
+            "system_instruction": args.system_prompt,
+        }
+
+        audio_chunks: list[bytes] = []
+        transcript = ""
+        async with client.aio.live.connect(model=args.gemini_live_model, config=cfg) as session:
+            await session.send_realtime_input(
+                audio=types.Blob(data=pcm_in, mime_type="audio/pcm;rate=16000")
+            )
+            await session.send_client_content(
+                turns={"role": "user", "parts": [{"text": "Respond with one concise English-teacher correction."}]},
+                turn_complete=True,
+            )
+
+            async for msg in session.receive():
+                server_content = getattr(msg, "server_content", None)
+                if server_content is None:
+                    continue
+
+                model_turn = getattr(server_content, "model_turn", None)
+                if model_turn is not None:
+                    for part in getattr(model_turn, "parts", []) or []:
+                        inline = getattr(part, "inline_data", None)
+                        if inline is None or getattr(inline, "data", None) is None:
+                            continue
+                        mime = str(getattr(inline, "mime_type", "")).lower()
+                        if "audio/pcm" not in mime:
+                            continue
+                        data = inline.data
+                        if isinstance(data, str):
+                            data = base64.b64decode(data)
+                        audio_chunks.append(data)
+
+                out_tx = getattr(server_content, "output_transcription", None)
+                if out_tx is not None and getattr(out_tx, "text", None):
+                    transcript = out_tx.text
+
+                if getattr(server_content, "turn_complete", False):
+                    break
+
+        if not audio_chunks:
+            raise RuntimeError("Gemini Live returned no audio chunks.")
+        return b"".join(audio_chunks), transcript
+
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):
         _log_exception(f"UNHANDLED {request.method} {request.url.path}", exc)
@@ -298,12 +399,13 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     ):
         req_start = time.time()
         effective_backend = (reply_backend or args.reply_backend).strip().lower()
-        if effective_backend not in {"gemini", "ollama"}:
-            return JSONResponse(status_code=400, content={"error": "reply_backend must be 'gemini' or 'ollama'."})
+        if effective_backend not in {"gemini", "ollama", "gemini_live"}:
+            return JSONResponse(status_code=400, content={"error": "reply_backend must be 'gemini', 'ollama', or 'gemini_live'."})
         print(
             f"[{time.strftime('%H:%M:%S')}] POST /converse "
             f"filename={audio.filename} session_id={session_id} prefix={output_prefix} backend={effective_backend}"
         )
+        print(f"[{time.strftime('%H:%M:%S')}] /converse build marker: v2-backend-select")
         if not audio.filename.lower().endswith(".wav"):
             return JSONResponse(status_code=400, content={"error": "Only wav files are supported."})
 
@@ -313,24 +415,59 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         out_path = resolve_output_path(output_dir, output_prefix or args.output_prefix)
 
         try:
+            t_req_ms = _now_ms()
             with open(student_wav, "wb") as f:
                 f.write(await audio.read())
+            upload_ms = _now_ms() - t_req_ms
 
+            file_size = student_wav.stat().st_size if student_wav.exists() else 0
+            audio_duration_s = 0.0
+            try:
+                with wave.open(str(student_wav), "rb") as w:
+                    frames = w.getnframes()
+                    rate = w.getframerate()
+                    if rate > 0:
+                        audio_duration_s = frames / float(rate)
+            except Exception:
+                pass
+            print(
+                f"[{time.strftime('%H:%M:%S')}] /converse upload: "
+                f"size={file_size}B duration={audio_duration_s:.2f}s write_ms={upload_ms:.0f}"
+            )
+
+            t_lock_wait = _now_ms()
             with infer_lock:
-                t0 = time.time()
-                student_text = transcribe_with_gemini(student_wav)
-                stt_ms = (time.time() - t0) * 1000
+                lock_wait_ms = _now_ms() - t_lock_wait
+                print(f"[{time.strftime('%H:%M:%S')}] /converse lock_wait_ms={lock_wait_ms:.0f}")
 
-                t1 = time.time()
-                if effective_backend == "gemini":
-                    teacher_reply = reply_with_gemini(student_text, session_id)
+                if effective_backend == "gemini_live":
+                    stt_ms = 0.0
+                    tts_ms = 0.0
+                    t1 = time.time()
+                    live_pcm, live_transcript = await reply_audio_with_gemini_live(student_wav)
+                    llm_ms = (time.time() - t1) * 1000
+                    print(f"[{time.strftime('%H:%M:%S')}] /converse gemini_live_audio_ms={llm_ms:.0f}")
+                    student_text = "(gemini_live input audio)"
+                    teacher_reply = live_transcript or "(gemini_live output audio)"
+                    pcm24k_to_wav_file(live_pcm, reply_wav)
                 else:
-                    teacher_reply = reply_with_ollama(student_text, session_id)
-                llm_ms = (time.time() - t1) * 1000
+                    t0 = time.time()
+                    student_text = transcribe_with_gemini(student_wav)
+                    stt_ms = (time.time() - t0) * 1000
+                    print(f"[{time.strftime('%H:%M:%S')}] /converse stt_ms={stt_ms:.0f}")
 
-                t2 = time.time()
-                synthesize_tts_windows(teacher_reply, reply_wav)
-                tts_ms = (time.time() - t2) * 1000
+                    t1 = time.time()
+                    if effective_backend == "gemini":
+                        teacher_reply = reply_with_gemini(student_text, session_id)
+                    else:
+                        teacher_reply = reply_with_ollama(student_text, session_id)
+                    llm_ms = (time.time() - t1) * 1000
+                    print(f"[{time.strftime('%H:%M:%S')}] /converse llm_ms={llm_ms:.0f}")
+
+                    t2 = time.time()
+                    synthesize_tts_windows(teacher_reply, reply_wav)
+                    tts_ms = (time.time() - t2) * 1000
+                    print(f"[{time.strftime('%H:%M:%S')}] /converse tts_ms={tts_ms:.0f}")
 
                 t3 = time.time()
                 avatar.infer_audio(
@@ -343,10 +480,13 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     output_path=out_path,
                 )
                 render_ms = (time.time() - t3) * 1000
+                print(f"[{time.strftime('%H:%M:%S')}] /converse render_ms={render_ms:.0f}")
 
             print(
                 f"[{time.strftime('%H:%M:%S')}] /converse timings: "
-                f"stt={stt_ms:.0f}ms llm={llm_ms:.0f}ms tts={tts_ms:.0f}ms render={render_ms:.0f}ms"
+                f"upload={upload_ms:.0f}ms lock_wait={lock_wait_ms:.0f}ms "
+                f"stt={stt_ms:.0f}ms llm={llm_ms:.0f}ms tts={tts_ms:.0f}ms render={render_ms:.0f}ms "
+                f"total={( _now_ms() - t_req_ms):.0f}ms"
             )
             print(f"[{time.strftime('%H:%M:%S')}] reply_backend='{effective_backend}'")
             print(f"[{time.strftime('%H:%M:%S')}] student='{student_text}'")

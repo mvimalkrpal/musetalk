@@ -145,7 +145,7 @@ def main() -> None:
     }
     #call_shell {
       position: relative;
-      height: 94vh;
+      min-height: 94vh;
       border-radius: 24px;
       overflow: hidden;
       border: 1px solid var(--line);
@@ -161,18 +161,17 @@ def main() -> None:
       object-fit: cover !important;
     }
       #controls_bar {
-        position: absolute;
-      left: 10px;
-      right: 10px;
+      position: fixed;
+      left: 12px;
+      right: 12px;
       bottom: 10px;
-      z-index: 20;
+      z-index: 50;
       background: var(--glass);
       backdrop-filter: blur(10px);
       border: 1px solid var(--line);
       border-radius: 16px;
       padding: 8px;
     }
-    #controls_bar label {display: none !important;}
     #send_btn button {
       border-radius: 10px !important;
       height: 42px !important;
@@ -186,26 +185,32 @@ def main() -> None:
     /* Small screens: WhatsApp/FaceTime style */
     @media (max-width: 767px) {
       .gradio-container {max-width: 430px !important; margin: 0 auto !important; padding: 6px !important;}
-      #call_shell {height: 95vh; border-radius: 22px;}
+      #call_shell {min-height: 130vh; border-radius: 22px; padding-bottom: 220px;}
+      #gemini_video, #ollama_video {height: 44vh !important;}
     }
 
     /* Large screens: Zoom/Meet style */
     @media (min-width: 1024px) {
       .gradio-container {padding: 18px !important;}
       #call_shell {
-        height: 88vh;
+        min-height: 88vh;
         border-radius: 18px;
         display: grid;
-        grid-template-columns: 1.4fr 1.4fr 0.9fr;
+        grid-template-columns: 1fr 1fr 360px;
+        align-items: stretch;
       }
       #gemini_video, #ollama_video {
-        height: 100% !important;
+        height: 88vh !important;
         border-right: 1px solid var(--line);
       }
       #controls_bar {
-        position: static;
+        position: sticky;
+        top: 14px;
+        right: 0;
         margin: 14px;
-        align-self: end;
+        height: fit-content;
+        align-self: start;
+        z-index: 20;
       }
     }
     """
@@ -216,8 +221,8 @@ def main() -> None:
             ollama_video = gr.Video(label="Ollama", elem_id="ollama_video")
             with gr.Column(elem_id="controls_bar"):
                 backend_sel = gr.CheckboxGroup(
-                    choices=["gemini", "ollama"],
-                    value=["gemini", "ollama"],
+                    choices=["gemini_live", "gemini", "ollama"],
+                    value=["gemini_live"],
                     label="Brain",
                 )
                 audio_in = gr.Audio(
