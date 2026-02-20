@@ -138,6 +138,45 @@ https://github.com/user-attachments/assets/b011ece9-a332-4bc1-b8b7-ef6e383d7bde
 # Getting Started
 We provide a detailed tutorial about the installation and the basic usage of MuseTalk for new users:
 
+## Teacher Server Quickstart
+If you are using `teacher_api_server.py`, you can run with only your Gemini key:
+
+```bash
+python teacher_api_server.py --gemini_api_key "YOUR_KEY"
+```
+
+Default values:
+- `avatar_id=teacher1`
+- `video_path=data/video/yongen.mp4`
+- `reply_backend=gemini_live`
+- `host=0.0.0.0`
+- `port=8787`
+
+Optional override flags:
+- `--avatar_id`
+- `--video_path`
+- `--prepare`
+- `--host`
+- `--port`
+- `--reply_backend` (`gemini_live|gemini|ollama`)
+- `--gemini_api_key`
+- `--gemini_model`
+- `--gemini_live_model`
+- `--gemini_live_api_version`
+- `--ollama_endpoint`
+- `--ollama_model`
+- `--system_prompt`
+- `--tts_rate`
+- `--tts_voice`
+- `--fps`
+- `--batch_size`
+- `--audio_padding_length_left`
+- `--audio_padding_length_right`
+- `--parsing_mode`
+- `--left_cheek_width`
+- `--right_cheek_width`
+- `--extra_margin`
+
 ## Third party integration
 Thanks for the third-party integration, which makes installation and use more convenient for everyone.
 We also hope you note that we have not verified, maintained, or updated third-party. Please refer to this project for specific results.

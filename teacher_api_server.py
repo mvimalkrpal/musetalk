@@ -58,8 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8787)
 
-    parser.add_argument("--avatar_id", required=True)
-    parser.add_argument("--video_path", required=True)
+    parser.add_argument("--avatar_id", default="teacher1")
+    parser.add_argument("--video_path", default="data/video/yongen.mp4")
     parser.add_argument("--prepare", action="store_true")
 
     parser.add_argument("--output_dir", default="./results/v15/api_out")
@@ -90,8 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gemini_live_model",
         type=str,
-        default="gemini-2.5-flash-native-audio-preview-09-2025",
+        default="gemini-2.5-flash-native-audio-preview-12-2025",
     )
+    parser.add_argument("--gemini_live_api_version", type=str, default="v1beta")
     parser.add_argument(
         "--system_prompt",
         type=str,
@@ -278,7 +279,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             raise RuntimeError("Install google-genai for Gemini Live: pip install google-genai") from exc
 
         pcm_in = wav_to_pcm16k_bytes(student_wav)
-        client = genai.Client(api_key=gemini_key)
+        client = genai.Client(api_key=gemini_key, http_options={"api_version": args.gemini_live_api_version})
         try:
             modality_audio = getattr(types, "Modality").AUDIO
         except Exception:
